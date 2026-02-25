@@ -1,11 +1,26 @@
 #include "gfa_graph_to_handle.hpp"
+#include "atomic_queue.h"
 #include "progress.hpp"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <iostream>
+#include <mutex>
+#include <sstream>
 #include <thread>
 
 namespace odgi {
+
+struct gfa_graph_path_job_t {
+  handlegraph::path_handle_t path;
+  const std::vector<NodeId>* steps;
+  const std::string* name;
+  bool is_walk;
+};
+
+typedef atomic_queue::AtomicQueue<gfa_graph_path_job_t*, 2 << 10>
+    gfa_graph_path_queue_t;
 
 void gfa_graph_to_handle(const GfaGraph &gfa_graph,
                          handlegraph::MutablePathMutableHandleGraph *graph,
@@ -13,6 +28,24 @@ void gfa_graph_to_handle(const GfaGraph &gfa_graph,
                          bool show_progress) {
 
   n_threads = (n_threads == 0 ? 1 : n_threads);
+  std::atomic<bool> failed{false};
+  std::mutex error_mutex;
+  std::string error_message;
+
+  auto record_error = [&](const std::string& msg) {
+    bool expected = false;
+    if (failed.compare_exchange_strong(expected, true)) {
+      std::lock_guard<std::mutex> lock(error_mutex);
+      error_message = msg;
+    }
+  };
+
+  auto abort_if_failed = [&]() {
+    if (failed.load()) {
+      std::cerr << error_message << std::endl;
+      exit(1);
+    }
+  };
 
   // 1. Nodes (S-lines). In GfaGraph, index 0 is placeholder
   if (gfa_graph.node_sequences.size() > 1) {
@@ -56,14 +89,16 @@ void gfa_graph_to_handle(const GfaGraph &gfa_graph,
         handlegraph::handle_t b = graph->get_handle(sink_id, to_is_rev);
         graph->create_edge(a, b);
       } else {
-        std::cerr << "[odgi::gfa_graph_to_handle] Error creating edge due to "
-                     "missing node(s): "
-                  << source_id << " -> " << sink_id << std::endl;
-        exit(1);
+        std::ostringstream oss;
+        oss << "[odgi::gfa_graph_to_handle] Error creating edge due to "
+               "missing node(s): "
+            << source_id << " -> " << sink_id;
+        record_error(oss.str());
       }
       if (show_progress)
         progress_meter->increment(1);
     }
+    abort_if_failed();
     if (show_progress)
       progress_meter->finish();
   }
@@ -78,27 +113,63 @@ void gfa_graph_to_handle(const GfaGraph &gfa_graph,
               "[odgi::gfa_graph_to_handle] building paths:");
     }
 
-    for (size_t i = 0; i < gfa_graph.paths.size(); ++i) {
-      handlegraph::path_handle_t p_h =
-          graph->create_path_handle(gfa_graph.path_names[i]);
-
-      for (NodeId node_id : gfa_graph.paths[i]) {
-        uint64_t id = std::abs(node_id);
-        bool is_rev = node_id < 0;
-
-        if (graph->has_node(id)) {
-          graph->append_step(p_h, graph->get_handle(id, is_rev));
+    gfa_graph_path_queue_t path_queue;
+    std::atomic<bool> work_todo{false};
+    auto worker = [&](uint64_t tid) {
+      (void)tid;
+      while (work_todo.load()) {
+        gfa_graph_path_job_t* job;
+        if (path_queue.try_pop(job)) {
+          if (!failed.load()) {
+            for (NodeId node_id : *job->steps) {
+              uint64_t id = std::abs(node_id);
+              bool is_rev = node_id < 0;
+              if (graph->has_node(id)) {
+                graph->append_step(job->path, graph->get_handle(id, is_rev));
+              } else {
+                std::ostringstream oss;
+                oss << "[odgi::gfa_graph_to_handle] Error: Node " << id
+                    << " not found for " << (job->is_walk ? "walk " : "path ")
+                    << *job->name;
+                record_error(oss.str());
+                break;
+              }
+            }
+          }
+          if (show_progress)
+            progress_meter->increment(1);
+          delete job;
         } else {
-          std::cerr << "[odgi::gfa_graph_to_handle] Error: Node " << id
-                    << " not found for path " << gfa_graph.path_names[i]
-                    << std::endl;
-          exit(1);
+          std::this_thread::sleep_for(std::chrono::nanoseconds(1));
         }
       }
-      if (show_progress)
-        progress_meter->increment(1);
+    };
+
+    std::vector<std::thread> workers;
+    workers.reserve(n_threads);
+    work_todo.store(true);
+    for (uint64_t t = 0; t < n_threads; ++t) {
+      workers.emplace_back(worker, t);
     }
 
+    for (size_t i = 0; i < gfa_graph.paths.size(); ++i) {
+      handlegraph::path_handle_t p_h = graph->create_path_handle(gfa_graph.path_names[i]);
+      auto* job = new gfa_graph_path_job_t{
+          p_h, &gfa_graph.paths[i], &gfa_graph.path_names[i], false};
+      path_queue.push(job);
+    }
+
+    while (!path_queue.was_empty()) {
+      if (failed.load()) {
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::nanoseconds(1));
+    }
+    work_todo.store(false);
+    for (auto& t : workers) {
+      t.join();
+    }
+    abort_if_failed();
     if (show_progress)
       progress_meter->finish();
   }
@@ -111,6 +182,46 @@ void gfa_graph_to_handle(const GfaGraph &gfa_graph,
           std::make_unique<algorithms::progress_meter::ProgressMeter>(
               gfa_graph.walks.size(),
               "[odgi::gfa_graph_to_handle] building walks:");
+    }
+
+    std::vector<std::string> walk_names(gfa_graph.walks.size());
+    gfa_graph_path_queue_t walk_queue;
+    std::atomic<bool> work_todo{false};
+    auto worker = [&](uint64_t tid) {
+      (void)tid;
+      while (work_todo.load()) {
+        gfa_graph_path_job_t* job;
+        if (walk_queue.try_pop(job)) {
+          if (!failed.load()) {
+            for (NodeId node_id : *job->steps) {
+              uint64_t id = std::abs(node_id);
+              bool is_rev = node_id < 0;
+              if (graph->has_node(id)) {
+                graph->append_step(job->path, graph->get_handle(id, is_rev));
+              } else {
+                std::ostringstream oss;
+                oss << "[odgi::gfa_graph_to_handle] Error: Node " << id
+                    << " not found for " << (job->is_walk ? "walk " : "path ")
+                    << *job->name;
+                record_error(oss.str());
+                break;
+              }
+            }
+          }
+          if (show_progress)
+            progress_meter->increment(1);
+          delete job;
+        } else {
+          std::this_thread::sleep_for(std::chrono::nanoseconds(1));
+        }
+      }
+    };
+
+    std::vector<std::thread> workers;
+    workers.reserve(n_threads);
+    work_todo.store(true);
+    for (uint64_t t = 0; t < n_threads; ++t) {
+      workers.emplace_back(worker, t);
     }
 
     for (size_t i = 0; i < gfa_graph.walks.size(); ++i) {
@@ -128,23 +239,24 @@ void gfa_graph_to_handle(const GfaGraph &gfa_graph,
         walk_name += ":" + std::to_string(gfa_graph.walks.seq_starts[i]) + "-" +
                      std::to_string(gfa_graph.walks.seq_ends[i]);
       }
-
-      handlegraph::path_handle_t p_h = graph->create_path_handle(walk_name);
-      for (NodeId node_id : gfa_graph.walks.walks[i]) {
-        uint64_t id = std::abs(node_id);
-        bool is_rev = node_id < 0;
-
-        if (graph->has_node(id)) {
-          graph->append_step(p_h, graph->get_handle(id, is_rev));
-        } else {
-          std::cerr << "[odgi::gfa_graph_to_handle] Error: Node " << id
-                    << " not found for walk " << walk_name << std::endl;
-          exit(1);
-        }
-      }
-      if (show_progress)
-        progress_meter->increment(1);
+      walk_names[i] = std::move(walk_name);
+      handlegraph::path_handle_t p_h = graph->create_path_handle(walk_names[i]);
+      auto* job = new gfa_graph_path_job_t{
+          p_h, &gfa_graph.walks.walks[i], &walk_names[i], true};
+      walk_queue.push(job);
     }
+
+    while (!walk_queue.was_empty()) {
+      if (failed.load()) {
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::nanoseconds(1));
+    }
+    work_todo.store(false);
+    for (auto& t : workers) {
+      t.join();
+    }
+    abort_if_failed();
     if (show_progress)
       progress_meter->finish();
   }
