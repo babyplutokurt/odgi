@@ -541,6 +541,7 @@ add_library(odgi_objs OBJECT
   ${CMAKE_SOURCE_DIR}/src/algorithms/subgraph/extract.cpp
   ${CMAKE_SOURCE_DIR}/src/position.cpp
   ${CMAKE_SOURCE_DIR}/src/gfa_to_handle.cpp
+  ${CMAKE_SOURCE_DIR}/src/gfa_graph_to_handle.cpp
   ${CMAKE_SOURCE_DIR}/src/split.cpp
   ${CMAKE_SOURCE_DIR}/src/node.cpp
   ${CMAKE_SOURCE_DIR}/src/subgraph.cpp
