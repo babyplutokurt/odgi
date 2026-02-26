@@ -6,7 +6,7 @@
 
 namespace odgi {
 
-void gfa_graph_to_handle(const GfaGraph &gfa_graph,
+void gfa_graph_to_handle(GfaGraph &gfa_graph,
                          handlegraph::MutablePathMutableHandleGraph *graph,
                          bool compact_ids, uint64_t n_threads,
                          bool show_progress);

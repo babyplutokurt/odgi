@@ -22,7 +22,7 @@ struct gfa_graph_path_job_t {
 typedef atomic_queue::AtomicQueue<gfa_graph_path_job_t*, 2 << 10>
     gfa_graph_path_queue_t;
 
-void gfa_graph_to_handle(const GfaGraph &gfa_graph,
+void gfa_graph_to_handle(GfaGraph &gfa_graph,
                          handlegraph::MutablePathMutableHandleGraph *graph,
                          bool compact_ids, uint64_t n_threads,
                          bool show_progress) {
@@ -47,6 +47,19 @@ void gfa_graph_to_handle(const GfaGraph &gfa_graph,
     }
   };
 
+  // These fields are not consumed by odgi build. Release them early.
+  gfa_graph.header_line.clear();
+  std::vector<OptionalFieldColumn>().swap(gfa_graph.segment_optional_fields);
+  std::vector<OptionalFieldColumn>().swap(gfa_graph.link_optional_fields);
+  {
+    JumpData empty;
+    std::swap(gfa_graph.jumps, empty);
+  }
+  {
+    ContainmentData empty;
+    std::swap(gfa_graph.containments, empty);
+  }
+
   // 1. Nodes (S-lines). In GfaGraph, index 0 is placeholder
   if (gfa_graph.node_sequences.size() > 1) {
     std::unique_ptr<algorithms::progress_meter::ProgressMeter> progress_meter;
@@ -67,6 +80,11 @@ void gfa_graph_to_handle(const GfaGraph &gfa_graph,
     if (show_progress)
       progress_meter->finish();
   }
+
+  // Segment names and sequences are no longer needed after node creation.
+  std::unordered_map<std::string, uint32_t>().swap(gfa_graph.node_name_to_id);
+  std::vector<std::string>().swap(gfa_graph.node_id_to_name);
+  std::vector<std::string>().swap(gfa_graph.node_sequences);
 
   // 2. Edges (L-lines)
   if (!gfa_graph.links.from_ids.empty()) {
@@ -93,6 +111,12 @@ void gfa_graph_to_handle(const GfaGraph &gfa_graph,
     abort_if_failed();
     if (show_progress)
       progress_meter->finish();
+  }
+
+  // Release link columns after edge construction.
+  {
+    LinkData empty;
+    std::swap(gfa_graph.links, empty);
   }
 
   // 3. Paths (P-lines)
@@ -156,6 +180,11 @@ void gfa_graph_to_handle(const GfaGraph &gfa_graph,
     if (show_progress)
       progress_meter->finish();
   }
+
+  // Release path columns after path construction.
+  std::vector<std::string>().swap(gfa_graph.path_names);
+  std::vector<std::vector<NodeId>>().swap(gfa_graph.paths);
+  std::vector<std::string>().swap(gfa_graph.path_overlaps);
 
   // 4. Walks (W-lines) conversion
   if (gfa_graph.walks.size() > 0) {
@@ -233,6 +262,12 @@ void gfa_graph_to_handle(const GfaGraph &gfa_graph,
     abort_if_failed();
     if (show_progress)
       progress_meter->finish();
+  }
+
+  // Release walk columns after walk construction.
+  {
+    WalkData empty;
+    std::swap(gfa_graph.walks, empty);
   }
 
   if (compact_ids) {

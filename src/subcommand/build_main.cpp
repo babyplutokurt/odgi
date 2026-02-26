@@ -117,6 +117,10 @@ int main_build(int argc, char **argv) {
         GfaGraph gfa_graph;
         uint64_t threads = args::get(nthreads) ? args::get(nthreads) : 1;
         decompress_gfa(compressed_data, gfa_graph, threads);
+        {
+          CompressedData empty;
+          std::swap(compressed_data, empty);
+        }
 
         if (args::get(progress)) {
           std::cerr << "[odgi::build] Hydrating ODGI from GfaGraph..."
