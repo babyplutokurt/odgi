@@ -84,17 +84,9 @@ void gfa_graph_to_handle(const GfaGraph &gfa_graph,
       bool from_is_rev = gfa_graph.links.from_orients[i] == '-';
       bool to_is_rev = gfa_graph.links.to_orients[i] == '-';
 
-      if (graph->has_node(source_id) && graph->has_node(sink_id)) {
-        handlegraph::handle_t a = graph->get_handle(source_id, from_is_rev);
-        handlegraph::handle_t b = graph->get_handle(sink_id, to_is_rev);
-        graph->create_edge(a, b);
-      } else {
-        std::ostringstream oss;
-        oss << "[odgi::gfa_graph_to_handle] Error creating edge due to "
-               "missing node(s): "
-            << source_id << " -> " << sink_id;
-        record_error(oss.str());
-      }
+      handlegraph::handle_t a = graph->get_handle(source_id, from_is_rev);
+      handlegraph::handle_t b = graph->get_handle(sink_id, to_is_rev);
+      graph->create_edge(a, b);
       if (show_progress)
         progress_meter->increment(1);
     }
@@ -124,16 +116,7 @@ void gfa_graph_to_handle(const GfaGraph &gfa_graph,
             for (NodeId node_id : *job->steps) {
               uint64_t id = std::abs(node_id);
               bool is_rev = node_id < 0;
-              if (graph->has_node(id)) {
-                graph->append_step(job->path, graph->get_handle(id, is_rev));
-              } else {
-                std::ostringstream oss;
-                oss << "[odgi::gfa_graph_to_handle] Error: Node " << id
-                    << " not found for " << (job->is_walk ? "walk " : "path ")
-                    << *job->name;
-                record_error(oss.str());
-                break;
-              }
+              graph->append_step(job->path, graph->get_handle(id, is_rev));
             }
           }
           if (show_progress)
@@ -196,16 +179,7 @@ void gfa_graph_to_handle(const GfaGraph &gfa_graph,
             for (NodeId node_id : *job->steps) {
               uint64_t id = std::abs(node_id);
               bool is_rev = node_id < 0;
-              if (graph->has_node(id)) {
-                graph->append_step(job->path, graph->get_handle(id, is_rev));
-              } else {
-                std::ostringstream oss;
-                oss << "[odgi::gfa_graph_to_handle] Error: Node " << id
-                    << " not found for " << (job->is_walk ? "walk " : "path ")
-                    << *job->name;
-                record_error(oss.str());
-                break;
-              }
+              graph->append_step(job->path, graph->get_handle(id, is_rev));
             }
           }
           if (show_progress)
