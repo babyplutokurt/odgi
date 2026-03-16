@@ -523,13 +523,13 @@ ExternalProject_Add(mio
 ExternalProject_Get_property(mio SOURCE_DIR)
 set(mio_INCLUDE "${SOURCE_DIR}/include")
 
-# gfa_compression
+# GFAz
 set(BUILD_PYTHON_BINDINGS OFF CACHE BOOL "Disable gfaz python bindings" FORCE)
 set(BUILD_CLI OFF CACHE BOOL "Disable gfaz CLI" FORCE)
 set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable gfaz benchmarks" FORCE)
 set(BUILD_TESTS OFF CACHE BOOL "Disable gfaz tests" FORCE)
-add_subdirectory(deps/gfa_compression)
-set(gfa_compression_INCLUDE "${CMAKE_SOURCE_DIR}/deps/gfa_compression/include")
+add_subdirectory(deps/GFAz)
+set(gfa_compression_INCLUDE "${CMAKE_SOURCE_DIR}/deps/GFAz/include")
 
 # set up our target executable and specify its dependencies and includes
 add_library(odgi_objs OBJECT
