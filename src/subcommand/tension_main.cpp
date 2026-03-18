@@ -7,6 +7,7 @@
 #include "algorithms/tension/tension_bed_records_queued_writer.hpp"
 #include <numeric>
 #include "progress.hpp"
+#include "utils.hpp"
 
 namespace odgi {
 
@@ -74,9 +75,7 @@ int main_tension(int argc, char **argv) {
         if (infile == "-") {
             graph.deserialize(std::cin);
         } else {
-            ifstream f(infile.c_str());
-            graph.deserialize(f);
-            f.close();
+            utils::handle_gfa_odgi_input(infile, "tension", args::get(progress), thread_count, graph);
         }
     }
 
