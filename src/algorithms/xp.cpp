@@ -34,6 +34,19 @@ namespace xp {
         temp_file::cleanup(); // clean up our temporary files
     }
 
+    void XP::from_gfa_graph(GfaGraph &gfa_graph, const uint64_t& nthreads) {
+        std::string basename;
+        from_gfa_graph(gfa_graph, basename, nthreads);
+    }
+
+    void XP::from_gfa_graph(GfaGraph &gfa_graph, std::string basename, const uint64_t& nthreads) {
+        if (basename.empty()) {
+            basename = temp_file::get_dir() + '/';
+        }
+        from_gfa_graph_impl(gfa_graph, basename, nthreads);
+        temp_file::cleanup();
+    }
+
     void XP::from_handle_graph_impl(odgi::graph_t &graph, const std::string& basename, const uint64_t& nthreads) {
     	if (!graph.is_optimized()) {
 			std::cerr << "error [xp]: Graph to index is not optimized. Please run 'odgi sort' using -O, --optimize." << std::endl;
@@ -158,6 +171,123 @@ namespace xp {
         std::remove(node_path_idx.c_str());
         std::remove(path_name_file.c_str());
         // delete node_path_ms;
+    }
+
+    void XP::from_gfa_graph_impl(GfaGraph &gfa_graph, const std::string& basename, const uint64_t& nthreads) {
+        if (gfa_graph.node_sequences.size() < 2) {
+            std::cerr << "error [xp]: GfaGraph is empty or missing 1-based segment storage." << std::endl;
+            exit(1);
+        }
+
+        sdsl::cache_config config(true, basename);
+        std::string path_names;
+
+        const uint64_t node_count = gfa_graph.node_sequences.size() - 1;
+        std::vector<uint64_t> node_lengths(node_count, 0);
+
+        sdsl::int_vector<> position_map;
+        sdsl::util::assign(position_map, sdsl::int_vector<>(node_count + 1));
+        uint64_t len = 0;
+        for (uint64_t node_id = 1; node_id <= node_count; ++node_id) {
+            const uint64_t rank = node_id - 1;
+            position_map[rank] = len;
+            const uint64_t node_len = gfa_graph.node_sequences[node_id].size();
+            node_lengths[rank] = node_len;
+            len += node_len;
+        }
+        position_map[position_map.size() - 1] = len;
+
+        uint64_t np_size = 0;
+        std::string node_path_idx = basename + ".node_path.mm";
+        mmmulti::map<uint64_t, std::tuple<uint64_t, uint64_t, uint64_t, uint64_t>>
+            node_path_ms(node_path_idx, std::make_tuple(0, 0, 0, 0));
+        node_path_ms.open_writer();
+
+        auto append_path_to_index = [&](const std::string &path_name,
+                                        const std::vector<NodeId> &steps,
+                                        const uint64_t path_id) {
+            std::vector<handle_t> p;
+            p.reserve(steps.size());
+            uint64_t handle_rank_in_path = 0;
+            for (const auto& signed_id : steps) {
+                const uint64_t node_id = std::abs(signed_id);
+                if (node_id == 0 || node_id > node_count) {
+                    std::cerr << "error [xp]: path step node id " << node_id
+                              << " is out of bounds for GfaGraph with " << node_count
+                              << " segment(s)." << std::endl;
+                    exit(1);
+                }
+                const bool is_rev = signed_id < 0;
+                const handle_t h = number_bool_packing::pack(node_id - 1, is_rev);
+                p.push_back(h);
+                ++handle_rank_in_path; // handle ranks in path are 1-based
+                node_path_ms.append(node_id,
+                                    std::make_tuple(node_id, handle_rank_in_path, path_id, handle_rank_in_path));
+                np_size++;
+            }
+            XPPath *path_index = new XPPath(path_name, p, false, node_lengths);
+            paths.push_back(path_index);
+            path_names += start_marker + path_name + end_marker;
+        };
+
+        uint64_t path_id = 1;
+        for (size_t i = 0; i < gfa_graph.paths.size(); ++i) {
+            append_path_to_index(gfa_graph.path_names[i], gfa_graph.paths[i], path_id++);
+        }
+
+        for (size_t i = 0; i < gfa_graph.walks.size(); ++i) {
+            std::string walk_name = gfa_graph.walks.sample_ids[i] + "#" +
+                                    std::to_string(gfa_graph.walks.hap_indices[i]) +
+                                    "#" + gfa_graph.walks.seq_ids[i];
+            if (gfa_graph.walks.seq_starts.size() > i &&
+                gfa_graph.walks.seq_ends.size() > i &&
+                (gfa_graph.walks.seq_starts[i] != -1 ||
+                 gfa_graph.walks.seq_ends[i] != -1)) {
+                walk_name += ":" + std::to_string(gfa_graph.walks.seq_starts[i]) + "-" +
+                             std::to_string(gfa_graph.walks.seq_ends[i]);
+            }
+            append_path_to_index(walk_name, gfa_graph.walks.walks[i], path_id++);
+        }
+
+        sdsl::util::assign(pos_map_iv, sdsl::enc_vector<>(position_map));
+        path_count = paths.size();
+
+        sdsl::util::assign(pn_iv, sdsl::int_vector<>(path_names.size()));
+        sdsl::util::assign(pn_bv, sdsl::bit_vector(path_names.size()));
+        for (size_t i = 0; i < path_names.size(); ++i) {
+            pn_iv[i] = path_names[i];
+            if (path_names[i] == start_marker) {
+                pn_bv[i] = 1;
+            }
+        }
+        sdsl::util::assign(pn_bv_rank, sdsl::rank_support_v<1>(&pn_bv));
+        sdsl::util::assign(pn_bv_select, sdsl::bit_vector::select_1_type(&pn_bv));
+
+        std::string path_name_file = basename + ".pathnames.iv";
+        sdsl::store_to_file((const char *) path_names.c_str(), path_name_file);
+        sdsl::construct(pn_csa, path_name_file, config, 1);
+
+        node_path_ms.index(nthreads, node_count + 1);
+        sdsl::util::assign(nr_iv, sdsl::int_vector<>(np_size));
+        sdsl::util::assign(np_bv, sdsl::bit_vector(np_size));
+        sdsl::util::assign(npi_iv, sdsl::int_vector<>(np_size));
+
+        uint64_t np_offset = 0;
+        for (uint64_t i = 0; i < node_count; ++i) {
+            if (np_offset < np_bv.size()) {
+                np_bv[np_offset] = 1;
+            }
+            node_path_ms.for_values_of(i + 1, [&](const std::tuple<uint64_t, uint64_t, uint64_t, uint64_t>& v) {
+                nr_iv[np_offset] = std::get<3>(v); // handle_rank_of_path
+                npi_iv[np_offset] = std::get<2>(v); // path id
+                np_offset++;
+            });
+        }
+
+        sdsl::util::bit_compress(nr_iv);
+        sdsl::util::bit_compress(npi_iv);
+        std::remove(node_path_idx.c_str());
+        std::remove(path_name_file.c_str());
     }
 
     std::vector<XPPath *> XP::get_paths() const {
@@ -632,6 +762,61 @@ namespace xp {
         }
         std::cerr << std::endl;
 #endif
+    }
+
+    XPPath::XPPath(const std::string &path_name,
+                   const std::vector<handle_t> &path,
+                   bool is_circular,
+                   const std::vector<uint64_t> &node_lengths) {
+
+#ifdef debug_xppath
+        std::cerr << "Constructing xppath for path with handles:" << std::endl;
+    for (handle_t visiting : path) {
+        std::cerr << "\t" << as_integer(visiting) << std::endl;
+    }
+#endif
+
+        this->is_circular = is_circular;
+        sdsl::util::assign(handles, sdsl::int_vector<>(path.size()));
+        sdsl::util::assign(positions, sdsl::int_vector<>(path.size()));
+        sdsl::bit_vector directions_bv;
+        sdsl::util::assign(directions_bv, sdsl::bit_vector(path.size()));
+
+        size_t path_off = 0;
+        size_t path_length = 0;
+        uint64_t min_handle_int = (path.size() ? as_integer(path[0]) : 0);
+
+        for (size_t i = 1; i < path.size(); ++i) {
+            if (as_integer(path[i]) < min_handle_int) {
+                min_handle_int = as_integer(path[i]);
+            }
+        }
+        min_handle = as_handle(min_handle_int);
+
+        for (size_t i = 0; i < path.size(); ++i) {
+            const handle_t &handle = path[i];
+            const uint64_t rank = number_bool_packing::unpack_number(handle);
+            if (rank >= node_lengths.size()) {
+                throw std::runtime_error("Handle rank " + std::to_string(rank) +
+                                         " is out of bounds for node length table of size " +
+                                         std::to_string(node_lengths.size()));
+            }
+            const uint64_t node_len = node_lengths[rank];
+            path_length += node_len;
+            handles[i] = as_integer(local_handle(handle));
+        }
+        sdsl::util::bit_compress(handles);
+        sdsl::util::assign(offsets, sdsl::bit_vector(path_length));
+
+        for (size_t i = 0; i < path.size(); ++i) {
+            auto &handle = path[i];
+            offsets[path_off] = 1;
+            positions[i] = path_off;
+            path_off += node_lengths[number_bool_packing::unpack_number(handle)];
+        }
+        sdsl::util::bit_compress(positions);
+        sdsl::util::assign(offsets_rank, sdsl::bit_vector::rank_1_type(&offsets));
+        sdsl::util::assign(offsets_select, sdsl::bit_vector::select_1_type(&offsets));
     }
 
     void XPPath::load(std::istream &in) {

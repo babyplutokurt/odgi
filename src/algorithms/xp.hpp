@@ -17,6 +17,7 @@
 #include "mmmultimap.hpp"
 #include "odgi.hpp"
 #include "mutex"
+#include "gfa_parser.hpp"
 
 namespace xp {
 
@@ -68,9 +69,13 @@ namespace xp {
         /// Build the path index from a simple graph.
         void from_handle_graph(odgi::graph_t &graph, const uint64_t& nthreads);
         void from_handle_graph(odgi::graph_t &graph, std::string basename, const uint64_t& nthreads);
+        /// Build the path index directly from a GfaGraph.
+        void from_gfa_graph(GfaGraph &gfa_graph, const uint64_t& nthreads);
+        void from_gfa_graph(GfaGraph &gfa_graph, std::string basename, const uint64_t& nthreads);
 
         /// helper to builder
         void from_handle_graph_impl(odgi::graph_t &graph, const std::string& basename, const uint64_t& nthreads);
+        void from_gfa_graph_impl(GfaGraph &gfa_graph, const std::string& basename, const uint64_t& nthreads);
 
         /// Load this XP index from a stream. Throw an XPFormatError if the stream
         /// does not produce a valid XP file.
@@ -187,6 +192,10 @@ namespace xp {
                const std::vector<handlegraph::handle_t> &path,
                bool is_circular,
                const handlegraph::PathHandleGraph &graph);
+        XPPath(const std::string &path_name,
+               const std::vector<handlegraph::handle_t> &path,
+               bool is_circular,
+               const std::vector<uint64_t> &node_lengths);
         // Path names are stored in the XP object, in a compressed fashion, and are
         // not duplicated here.
 

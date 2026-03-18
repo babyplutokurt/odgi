@@ -2,6 +2,8 @@
 #include "odgi.hpp"
 #include "args.hxx"
 #include "algorithms/xp.hpp"
+#include "decompression_workflow.hpp"
+#include "serialization.hpp"
 #include "utils.hpp"
 
 namespace odgi {
@@ -58,23 +60,36 @@ namespace odgi {
 
 		const uint64_t num_threads = nthreads ? args::get(nthreads) : 1;
 
-		// read in the graph
-        graph_t graph;
         assert(argc > 0);
+        XP path_index;
         {
             const std::string infile = args::get(dg_in_file);
             if (!infile.empty()) {
                 if (infile == "-") {
+                    graph_t graph;
                     graph.deserialize(std::cin);
+                    path_index.from_handle_graph(graph, num_threads);
                 } else {
-					utils::handle_gfa_odgi_input(infile, "pathindex", args::get(progress), num_threads, graph);
-
+                    if (utils::ends_with(infile, ".gfaz")) {
+                        if (args::get(progress)) {
+                            std::cerr << "[odgi::pathindex] decompressing GFAZ input." << std::endl;
+                        }
+                        CompressedData compressed_data = deserialize_compressed_data(infile);
+                        GfaGraph gfa_graph;
+                        decompress_gfa(compressed_data, gfa_graph, num_threads);
+                        {
+                            CompressedData empty;
+                            std::swap(compressed_data, empty);
+                        }
+                        path_index.from_gfa_graph(gfa_graph, num_threads);
+                    } else {
+                        graph_t graph;
+                        utils::handle_gfa_odgi_input(infile, "pathindex", args::get(progress), num_threads, graph);
+                        path_index.from_handle_graph(graph, num_threads);
+                    }
                 }
             }
         }
-
-        XP path_index;
-        path_index.from_handle_graph(graph, num_threads);
 		if (progress) {
 			std::cout << "Indexed " << path_index.path_count << " path(s)." << std::endl;
 		}
