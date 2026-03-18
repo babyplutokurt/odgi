@@ -1,6 +1,9 @@
 #include <string>
 #include <algorithm>
 #include "utils.hpp"
+#include "decompression_workflow.hpp"
+#include "gfa_graph_to_handle.hpp"
+#include "serialization.hpp"
 
 namespace utils {
     bool is_number(const std::string &s) {
@@ -89,14 +92,30 @@ namespace utils {
 			std::cerr << "[odgi::" << subcommmand_name << "] error: the given file \"" << infile << "\" does not exist. Please specify an existing input file in ODGI format via -i=[FILE], --idx=[FILE]." << std::endl;
 			exit(1);
 		}
-		if (utils::ends_with(infile, "gfa")) {
+		const uint64_t threads = num_threads ? num_threads : 1;
+		if (utils::ends_with(infile, ".gfaz")) {
+			if (progress) {
+				std::cerr << "[odgi::" << subcommmand_name << "] warning: the given file \"" << infile << "\" is not in ODGI format. "
+																				   "Building graph in ODGI format from given GFAZ." << std::endl;
+				std::cerr << "[odgi::" << subcommmand_name << "] decompressing GFAZ input." << std::endl;
+			}
+			CompressedData compressed_data = deserialize_compressed_data(infile);
+			GfaGraph gfa_graph;
+			decompress_gfa(compressed_data, gfa_graph, threads);
+			{
+				CompressedData empty;
+				std::swap(compressed_data, empty);
+			}
+			gfa_graph_to_handle(gfa_graph, &graph, false, threads, progress);
+			graph.set_number_of_threads(threads);
+		} else if (utils::ends_with(infile, ".gfa")) {
 			if (progress) {
 				std::cerr << "[odgi::" << subcommmand_name << "] warning: the given file \"" << infile << "\" is not in ODGI format. "
 																				   "To save time in the future, please use odgi build -i=[FILE], --idx=[FILE] -o=[FILE], --out=[FILE] "
 																				   "to generate a graph in ODGI format. Such a graph can be supplied to all ODGI subcommands. Building graph in ODGI format from given GFA." << std::endl;
 			}
-			gfa_to_handle(infile, &graph, false, num_threads, progress);
-			graph.set_number_of_threads(num_threads);
+			gfa_to_handle(infile, &graph, false, threads, progress);
+			graph.set_number_of_threads(threads);
 		} else {
 			ifstream f(infile.c_str());
 			graph.deserialize(f);

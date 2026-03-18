@@ -7,7 +7,6 @@
 #include <cmath>
 #include <iostream>
 #include <mutex>
-#include <sstream>
 #include <thread>
 
 namespace odgi {
