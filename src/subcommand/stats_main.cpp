@@ -6,8 +6,11 @@
 #include <omp.h>
 #include "algorithms/layout.hpp"
 #include "algorithms/weakly_connected_components.hpp"
+#include "algorithms/gfagraph_stats.hpp"
 #include "cover.hpp"
 #include "utils.hpp"
+#include "decompression_workflow.hpp"
+#include "serialization.hpp"
 #include <filesystem>
 #include "split.hpp"
 
@@ -154,29 +157,6 @@ int main_stats(int argc, char** argv) {
 	const uint64_t num_threads = args::get(threads) ? args::get(threads) : 1;
 	omp_set_num_threads(num_threads);
 
-    graph_t graph;
-    assert(argc > 0);
-    const std::string infile = args::get(dg_in_file);
-    if (!infile.empty()) {
-        if (infile == "-") {
-            graph.deserialize(std::cin);
-        } else {
-			utils::handle_gfa_odgi_input(infile, "stats", args::get(progress), num_threads, graph);
-        }
-    }
-
-	const uint64_t shift = number_bool_packing::unpack_number(graph.get_handle(graph.min_node_id()));
-
-    if (args::get(mean_links_length) || args::get(sum_of_path_node_distances)) {
-		if (number_bool_packing::unpack_number(graph.get_handle(graph.max_node_id())) - shift >= graph.get_node_count()){
-			std::cerr << "[odgi::stats] error: the node IDs are not compacted. Please run 'odgi sort' using -O, --optimize to optimize the graph." << std::endl;
-			exit(1);
-		}
-    }
-	if (_multiqc || _yaml) {
-    	std::cout << "---" << std::endl;
-    }
-
 	// per default, we want option -S to be shown
 	const bool no_args = !(args::get(_weakly_connected_components) ||
 			args::get(_num_self_loops) ||
@@ -195,6 +175,123 @@ int main_stats(int argc, char** argv) {
 			args::get(links_length_per_nuc) ||
 			args::get(_multiqc) ||
 			args::get(_yaml));
+
+    assert(argc > 0);
+    const std::string infile = args::get(dg_in_file);
+    const bool is_gfaz_input = !infile.empty() && infile != "-" && utils::ends_with(infile, ".gfaz");
+    const bool has_unsupported_fastpath_modes =
+            args::get(_weakly_connected_components) ||
+            args::get(_show_nondeterministic_edges) ||
+            path_delim ||
+            _pangenome_sequence_class_counts ||
+            args::get(mean_links_length) ||
+            args::get(dont_penalize_gap_links) ||
+            args::get(sum_of_path_node_distances) ||
+            args::get(penalize_diff_orientation) ||
+            args::get(path_statistics) ||
+            args::get(weighted_feedback_arc) ||
+            args::get(weighted_reversing_join) ||
+            args::get(links_length_per_nuc) ||
+            args::get(_multiqc);
+    if (is_gfaz_input && !has_unsupported_fastpath_modes) {
+        if (_yaml) {
+            std::cout << "---" << std::endl;
+        }
+        const bool needs_graph_stats = args::get(_summarize) || no_args || args::get(_num_self_loops) || args::get(base_content);
+        if (needs_graph_stats) {
+            if (args::get(progress)) {
+                std::cerr << "[odgi::stats] decompressing GFAZ input." << std::endl;
+            }
+
+            CompressedData compressed_data = deserialize_compressed_data(infile);
+            GfaGraph gfa_graph;
+            decompress_gfa(compressed_data, gfa_graph, num_threads);
+            {
+                CompressedData empty;
+                std::swap(compressed_data, empty);
+            }
+
+            if (args::get(_summarize) || no_args) {
+                const auto summary = algorithms::summarize_gfagraph(gfa_graph);
+                if (_yaml) {
+                    std::cout << "length: " << summary.length_in_bp << std::endl;
+                    std::cout << "nodes: " << summary.node_count << std::endl;
+                    std::cout << "edges: " << summary.edge_count << std::endl;
+                    std::cout << "paths: " << summary.path_count << std::endl;
+                    std::cout << "steps: " << summary.step_count << std::endl;
+                } else {
+                    std::cout << "#length\tnodes\tedges\tpaths\tsteps" << std::endl;
+                    std::cout << summary.length_in_bp << "\t" << summary.node_count << "\t" << summary.edge_count
+                              << "\t" << summary.path_count << "\t" << summary.step_count << std::endl;
+                }
+            }
+
+            if (args::get(_num_self_loops)) {
+                const auto self_loops = algorithms::gfagraph_self_loops(gfa_graph);
+                if (_yaml) {
+                    std::cout << "num_nodes_self_loops:" << std::endl;
+                    std::cout << "  total: " << self_loops.first << std::endl;
+                    std::cout << "  unique: " << self_loops.second << std::endl;
+                } else {
+                    std::cout << "#type\tnum" << std::endl;
+                    std::cout << "total" << "\t" << self_loops.first << std::endl;
+                    std::cout << "unique" << "\t" << self_loops.second << std::endl;
+                }
+            }
+
+            if (args::get(base_content)) {
+                const auto chars = algorithms::gfagraph_base_content(gfa_graph);
+                for (uint64_t i = 0; i < chars.size(); ++i) {
+                    if (chars[i]) {
+                        if (_yaml) {
+                            std::cout << static_cast<char>(i) << ": " << chars[i] << std::endl;
+                        } else {
+                            std::cout << static_cast<char>(i) << "\t" << chars[i] << std::endl;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (_file_size) {
+            const filesystem::path path_infile = infile;
+            std::error_code err_code;
+            std::uintmax_t file_size = filesystem::file_size(path_infile, err_code);
+            if (err_code) {
+                std::cerr << "[odgi::stats] error: " << infile << " : " << err_code.message() << std::endl;
+                exit(1);
+            } else {
+                if (_yaml) {
+                    std::cout << "file_size_in_bytes: " << file_size << std::endl;
+                } else {
+                    std::cout << file_size << std::endl;
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    graph_t graph;
+    if (!infile.empty()) {
+        if (infile == "-") {
+            graph.deserialize(std::cin);
+        } else {
+            utils::handle_gfa_odgi_input(infile, "stats", args::get(progress), num_threads, graph);
+        }
+    }
+
+    const uint64_t shift = number_bool_packing::unpack_number(graph.get_handle(graph.min_node_id()));
+
+    if (args::get(mean_links_length) || args::get(sum_of_path_node_distances)) {
+        if (number_bool_packing::unpack_number(graph.get_handle(graph.max_node_id())) - shift >= graph.get_node_count()){
+            std::cerr << "[odgi::stats] error: the node IDs are not compacted. Please run 'odgi sort' using -O, --optimize to optimize the graph." << std::endl;
+            exit(1);
+        }
+    }
+    if (_multiqc || _yaml) {
+        std::cout << "---" << std::endl;
+    }
 
     if (args::get(_summarize) || _multiqc || no_args) {
         uint64_t length_in_bp = 0, node_count = 0;

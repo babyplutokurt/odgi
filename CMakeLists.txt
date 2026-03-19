@@ -660,6 +660,7 @@ add_library(odgi_objs OBJECT
   ${CMAKE_SOURCE_DIR}/src/algorithms/inject.cpp
   ${CMAKE_SOURCE_DIR}/src/algorithms/procbed.cpp
   ${CMAKE_SOURCE_DIR}/src/algorithms/flip.cpp
+  ${CMAKE_SOURCE_DIR}/src/algorithms/gfagraph_stats.cpp
   ${CMAKE_SOURCE_DIR}/src/unittest/edge.cpp
   ${CMAKE_SOURCE_DIR}/src/unittest/inject.cpp
   ${CMAKE_SOURCE_DIR}/src/algorithms/tips.cpp
@@ -856,6 +857,7 @@ set(odgi_HEADERS
   ${CMAKE_SOURCE_DIR}/src/algorithms/untangle.hpp
   ${CMAKE_SOURCE_DIR}/src/algorithms/progress.hpp
   ${CMAKE_SOURCE_DIR}/src/algorithms/tips.hpp
+  ${CMAKE_SOURCE_DIR}/src/algorithms/gfagraph_stats.hpp
   ${CMAKE_SOURCE_DIR}/src/algorithms/tips_bed_writer_thread.hpp
   ${CMAKE_SOURCE_DIR}/src/algorithms/path_jaccard.hpp
   ${CMAKE_SOURCE_DIR}/src/algorithms/path_length.hpp
