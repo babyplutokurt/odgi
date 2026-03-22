@@ -661,6 +661,7 @@ add_library(odgi_objs OBJECT
   ${CMAKE_SOURCE_DIR}/src/algorithms/procbed.cpp
   ${CMAKE_SOURCE_DIR}/src/algorithms/flip.cpp
   ${CMAKE_SOURCE_DIR}/src/algorithms/gfagraph_stats.cpp
+  ${CMAKE_SOURCE_DIR}/src/algorithms/gfagraph_merge.cpp
   ${CMAKE_SOURCE_DIR}/src/unittest/edge.cpp
   ${CMAKE_SOURCE_DIR}/src/unittest/inject.cpp
   ${CMAKE_SOURCE_DIR}/src/algorithms/tips.cpp

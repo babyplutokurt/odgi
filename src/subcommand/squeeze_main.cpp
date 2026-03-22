@@ -3,9 +3,13 @@
 #include "odgi.hpp"
 #include "handlegraph/path_position_handle_graph.hpp"
 #include "progress.hpp"
+#include "decompression_workflow.hpp"
+#include "serialization.hpp"
+#include "algorithms/gfagraph_merge.hpp"
 
 #include "args.hxx"
 #include <queue>
+#include <filesystem>
 
 #include "utils.hpp"
 
@@ -106,7 +110,7 @@ namespace odgi {
 
         std::unique_ptr<algorithms::progress_meter::ProgressMeter> component_progress;
 
-        char separator;
+        char separator = '\0';
         if (_add_suffix) {
             separator = args::get(_add_suffix);
         }
@@ -128,81 +132,115 @@ namespace odgi {
         std::string line;
         while (std::getline(file_input_graphs, line)) {
             if (!line.empty()) {
-                graph_t graph;
+                auto append_hydrated_graph =
+                        [&](graph_t& graph, const uint64_t current_shift) -> uint64_t {
+                    uint64_t max_id = current_shift;
+                    uint64_t new_node_id;
 
-				utils::handle_gfa_odgi_input(line, "squeeze", args::get(progress), num_threads, graph);
+                    graph.for_each_handle([&](const handle_t &h) {
+                        new_node_id = graph.get_id(h) + current_shift;
 
-                if (optimize) {
-                    graph.optimize();
-                }
+                        squeezed_graph.create_handle(graph.get_sequence(h), new_node_id);
 
-                uint64_t max_id = 0;
-                uint64_t new_node_id;
-
-                graph.for_each_handle([&](const handle_t &h) {
-                    new_node_id = graph.get_id(h) + shift_id;
-
-                    squeezed_graph.create_handle(graph.get_sequence(h), new_node_id);
-
-                    if (new_node_id > max_id) {
-                        max_id = new_node_id;
-                    }
-                });
-
-                // add contacts for the edges
-                graph.for_each_handle([&](const handle_t &h) {
-                    handle_t new_handle_h = squeezed_graph.get_handle(graph.get_id(h) + shift_id);
-                    const bool h_is_rev = graph.get_is_reverse(h);
-
-                    graph.follow_edges(h, false, [&](const handle_t &o) {
-                        handle_t new_handle_o = squeezed_graph.get_handle(graph.get_id(o) + shift_id);
-                        const bool o_is_rev = graph.get_is_reverse(o);
-
-                        squeezed_graph.create_edge(
-                            h_is_rev ? graph.flip(new_handle_h) : new_handle_h,
-                            o_is_rev ? graph.flip(new_handle_o) : new_handle_o
-                        );
+                        if (new_node_id > max_id) {
+                            max_id = new_node_id;
+                        }
                     });
-                    graph.follow_edges(h, true, [&](const handle_t &o) {
-                        handle_t new_handle_o = squeezed_graph.get_handle(graph.get_id(o) + shift_id);
-                        const bool o_is_rev = graph.get_is_reverse(o);
 
-                        squeezed_graph.create_edge(
-                            o_is_rev ? graph.flip(new_handle_o) : new_handle_o,
-                            h_is_rev ? graph.flip(new_handle_h) : new_handle_h
-                        );
+                    // add contacts for the edges
+                    graph.for_each_handle([&](const handle_t &h) {
+                        handle_t new_handle_h = squeezed_graph.get_handle(graph.get_id(h) + current_shift);
+                        const bool h_is_rev = graph.get_is_reverse(h);
+
+                        graph.follow_edges(h, false, [&](const handle_t &o) {
+                            handle_t new_handle_o = squeezed_graph.get_handle(graph.get_id(o) + current_shift);
+                            const bool o_is_rev = graph.get_is_reverse(o);
+
+                            squeezed_graph.create_edge(
+                                h_is_rev ? graph.flip(new_handle_h) : new_handle_h,
+                                o_is_rev ? graph.flip(new_handle_o) : new_handle_o
+                            );
+                        });
+                        graph.follow_edges(h, true, [&](const handle_t &o) {
+                            handle_t new_handle_o = squeezed_graph.get_handle(graph.get_id(o) + current_shift);
+                            const bool o_is_rev = graph.get_is_reverse(o);
+
+                            squeezed_graph.create_edge(
+                                o_is_rev ? graph.flip(new_handle_o) : new_handle_o,
+                                h_is_rev ? graph.flip(new_handle_h) : new_handle_h
+                            );
+                        });
                     });
-                });
 
-                // Copy the paths
-                std::vector<std::pair<path_handle_t, path_handle_t>> old_and_new_paths;
-                old_and_new_paths.reserve(graph.get_path_count());
+                    // Copy the paths
+                    std::vector<std::pair<path_handle_t, path_handle_t>> old_and_new_paths;
+                    old_and_new_paths.reserve(graph.get_path_count());
 
-                graph.for_each_path_handle([&](const path_handle_t old_path_handle) {
-                    std::string new_path_name = graph.get_path_name(old_path_handle);
-                    if (_add_suffix) {
-                        new_path_name += separator + std::to_string(input_graph_rank);
-                    }
+                    graph.for_each_path_handle([&](const path_handle_t old_path_handle) {
+                        std::string new_path_name = graph.get_path_name(old_path_handle);
+                        if (_add_suffix) {
+                            new_path_name += separator + std::to_string(input_graph_rank);
+                        }
 
-                    path_handle_t new_path_handle = squeezed_graph.create_path_handle(
-                            new_path_name, graph.get_is_circular(old_path_handle));
+                        path_handle_t new_path_handle = squeezed_graph.create_path_handle(
+                                new_path_name, graph.get_is_circular(old_path_handle));
 
-                    old_and_new_paths.push_back({old_path_handle, new_path_handle});
-                });
+                        old_and_new_paths.push_back({old_path_handle, new_path_handle});
+                    });
 
 #pragma omp parallel for schedule(dynamic, 1) num_threads(num_threads)
-                for (auto old_new_path : old_and_new_paths) {
-                    graph.for_each_step_in_path(old_new_path.first, [&](const step_handle_t &step) {
-                        handle_t old_handle = graph.get_handle_of_step(step);
-                        handle_t new_handle = squeezed_graph.get_handle(
-                                graph.get_id(old_handle) + shift_id,
-                                graph.get_is_reverse(old_handle));
+                    for (size_t i = 0; i < old_and_new_paths.size(); ++i) {
+                        const auto old_new_path = old_and_new_paths[i];
+                        graph.for_each_step_in_path(old_new_path.first, [&](const step_handle_t &step) {
+                            handle_t old_handle = graph.get_handle_of_step(step);
+                            handle_t new_handle = squeezed_graph.get_handle(
+                                    graph.get_id(old_handle) + current_shift,
+                                    graph.get_is_reverse(old_handle));
 
-                        squeezed_graph.append_step(old_new_path.second, new_handle);
-                    });
+                            squeezed_graph.append_step(old_new_path.second, new_handle);
+                        });
+                    }
+
+                    return max_id;
+                };
+
+                if (utils::ends_with(line, ".gfaz") && !optimize) {
+                    if (!std::filesystem::exists(line)) {
+                        std::cerr
+                                << "[odgi::squeeze] error: the given file \"" << line << "\" does not exist."
+                                << std::endl;
+                        return 1;
+                    }
+                    if (debug) {
+                        std::cerr << "[odgi::squeeze] decompressing GFAZ input." << std::endl;
+                    }
+
+                    CompressedData compressed_data = deserialize_compressed_data(line);
+                    GfaGraph gfa_graph;
+                    decompress_gfa(compressed_data, gfa_graph, num_threads);
+                    {
+                        CompressedData empty;
+                        std::swap(compressed_data, empty);
+                    }
+
+                    shift_id = algorithms::append_gfagraph_with_shift(
+                            gfa_graph,
+                            &squeezed_graph,
+                            shift_id,
+                            static_cast<bool>(_add_suffix),
+                            separator,
+                            input_graph_rank,
+                            num_threads);
+                } else {
+                    graph_t graph;
+                    utils::handle_gfa_odgi_input(line, "squeeze", args::get(progress), num_threads, graph);
+
+                    if (optimize) {
+                        graph.optimize();
+                    }
+                    shift_id = append_hydrated_graph(graph, shift_id);
                 }
 
-                shift_id = max_id;
                 ++input_graph_rank;
 
                 if (debug) {
